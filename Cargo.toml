@@ -2,10 +2,17 @@
 
 name = "par-vec"
 version = "0.0.1"
+license = "MIT/Apache-2.0"
+description = "A wrapper of `Vec` that provides safe, concurrent mutation of non-overlapping slices."
 authors = [
-	"Alexis <a.beingessner@gmail.com>", 
-	"Austin <austin.bonander@gmail.com>"
+	"Austin Bonander <austin.bonander@gmail.com>"
 ]
+
+repository = "https://github.com/contain-rs/par-vec"
+homepage = "https://github.com/contain-rs/par-vec"
+documentation = "https://contain-rs.github.io/par-vec/par-vec"
+keywords = ["data-structures", "parallel"]
+readme = "README.md"
 
 [dev-dependencies]
 rand = "*"
