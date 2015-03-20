@@ -1,0 +1,5 @@
+[package]
+
+name = "par-vec"
+version = "0.0.1"
+authors = ["Alexis <a.beingessner@gmail.com>"]
