@@ -87,6 +87,7 @@ fn sub_slices<T>(parent: &[T], slice_count: usize) -> Vec<RawSlice<T>> {
     use std::cmp;
     use std::raw::Repr;
 
+    let len = parent.len();
     let mut start = 0;
 
     // By iteratively dividing the length remaining in the vector by the number of slices
