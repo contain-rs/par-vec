@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::mem;
 use std::ops;
 
-/// A vector that can be operated on concurrently via non-overlapping slices.
+/// Allows `T` to be held in `Arc` when it is only `Send`.
 struct RacyCell<T>(T);
 unsafe impl<T: Send> Sync for RacyCell<T> {}
 ///
@@ -45,9 +45,9 @@ impl<T: Send> ParVec<T> {
 
     /// Take the inner `Vec` if there are no slices remaining.
     /// Returns `Err(self)` if there are still slices out there.
-        // Unwrap if we hold a unique reference
-        // (we don't use weak refs so ignore those)
     pub fn try_unwrap(mut self) -> Result<Vec<T>, ParVec<T>> {
+        // Unwrap if we hold a unique reference.
+        // The return is required because `self` would still be borrowed mutably in `else`.
         if let Some(data) = arc::get_mut(&mut self.data) {
              return Ok(mem::replace(&mut data.0, Vec::new()));
         } 
@@ -62,17 +62,24 @@ impl<T: Send> ParVec<T> {
                 Ok(vec) => return vec,
                 Err(new_self) => self = new_self,
             }
+            // Yield from the spinlock so we don't eat up too much CPU time.
             ::std::thread::yield_now();
         }
     }
 }
 
+/// Create a vector of raw subslices that are as close to each other in size as possible.
 fn sub_slices<T>(parent: &[T], slice_count: usize) -> Vec<RawSlice<T>> {
     use std::cmp;
     use std::raw::Repr;
 
     let mut start = 0;
 
+    // By iteratively dividing the length remaining in the vector by the number of slices
+    // remaining, we get a set of slices with a minimal deviation of lengths.
+    //
+    // For example, taking 8 slices of a vector of length 42 should yield 6 slices of length 5 and
+    // 2 slices of length 6. In contrast, taking 7 slices should yield 7 slices of length 6.
     (1 .. slice_count + 1).rev().map(|curr| {
         let slice_len = (len - start) / curr;
         let end = cmp::min(start + slice_len, len);
@@ -88,7 +95,7 @@ fn sub_slices<T>(parent: &[T], slice_count: usize) -> Vec<RawSlice<T>> {
 /// Automatically releases the slice on drop.
 pub struct ParSlice<T: Send> {
     // Just to keep the source vector alive while the slice is,
-    // since the ParVec can die asynchronously.
+    // since the ParVec can drop asynchronously.
     _vec: Arc<RacyCell<Vec<T>>>,
     data: RawSlice<T>,
 }
@@ -170,7 +177,7 @@ mod test {
                 .map(|x| (x, Vec::new())).collect();
 
             // Shuffle so each thread gets an even distribution of work.
-            // Otherwise, the lower threads will quit early.
+            // Otherwise, the threads with the lower numbers will quit early.
             rng.shuffle(&mut *vec);
 
             let (par_vec, par_slices) = ParVec::new(vec, TEST_SLICES);
