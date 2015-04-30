@@ -1,36 +1,38 @@
-#![feature(alloc)]
+#![feature(alloc, core)]
 #![cfg_attr(test, feature(test, step_by))]
 
 extern crate alloc;
 
 use self::alloc::arc;
 
-use std::cmp::min;
 use std::fmt::{Formatter, Debug};
 use std::fmt::Error as FmtError;
+use std::raw::Slice as RawSlice;
 use std::sync::Arc;
 use std::mem;
 use std::ops;
 
 /// A vector that can be operated on concurrently via non-overlapping slices.
+struct RacyCell<T>(T);
+unsafe impl<T: Send> Sync for RacyCell<T> {}
 ///
 /// Get a `ParVec` and a vector of slices via `new()`, send the slices to other threads
 /// and mutate them, then get the mutated vector with `into_inner()` when finished.
 pub struct ParVec<T> {
-    data: Arc<Vec<T>>,
+    data: Arc<RacyCell<Vec<T>>>,
 }
 
-impl<T: 'static + Send + Sync> ParVec<T> {
+impl<T: Send> ParVec<T> {
     /// Create a new `ParVec`, returning it and a vector of slices that can be sent
     /// to other threads and mutated concurrently.
     pub fn new(vec: Vec<T>, slices: usize) -> (ParVec<T>, Vec<ParSlice<T>>) {
-        let data = Arc::new(vec);
-
-        let par_slices = sub_slices(&data[..], slices).into_iter()
-            .map(|slice|
+        let slices = sub_slices(&vec, slice_count);
+        let data = Arc::new(RacyCell(vec));
+        
+        let par_slices = slices.into_iter().map(|slice|
                 ParSlice {
                     _vec: data.clone(),
-                    data: unsafe { mem::transmute(slice) },
+                    data: slice,
                 }
             ).collect();
 
@@ -65,50 +67,51 @@ impl<T: 'static + Send + Sync> ParVec<T> {
     }
 }
 
-fn sub_slices<T>(parent: &[T], slice_count: usize) -> Vec<&[T]> {
-    let mut slices = Vec::new();
+fn sub_slices<T>(parent: &[T], slice_count: usize) -> Vec<RawSlice<T>> {
+    use std::cmp;
+    use std::raw::Repr;
 
-    let len = parent.len();
     let mut start = 0;
 
-    for curr in (1 .. slice_count + 1).rev() {
+    (1 .. slice_count + 1).rev().map(|curr| {
         let slice_len = (len - start) / curr;
-        let end = min(start + slice_len, len);
+        let end = cmp::min(start + slice_len, len);
 
-        slices.push(&parent[start..end]);
+        let slice = parent[start..end].repr();
         start += slice_len;
-    }
 
-    slices
+        slice
+    }).collect()
 }
 
 /// A slice of `ParVec` that can be sent to another task for processing.
 /// Automatically releases the slice on drop.
-pub struct ParSlice<T: Send + 'static> {
+pub struct ParSlice<T: Send> {
     // Just to keep the source vector alive while the slice is,
     // since the ParVec can die asynchronously.
-    _vec: Arc<Vec<T>>,
-    // This isn't actually &'static but we're guarding it so it's safe.
-    data: &'static mut [T],
+    _vec: Arc<RacyCell<Vec<T>>>,
+    data: RawSlice<T>,
 }
+
+unsafe impl<T: Send> Send for ParSlice<T> {}
 
 impl<T: Send> ops::Deref for ParSlice<T> {
     type Target = [T];
 
     fn deref<'a>(&'a self) -> &'a [T] {
-        self.data
+        unsafe { mem::transmute(self.data) }
     }
 }
 
 impl<T: Send> ops::DerefMut for ParSlice<T> {
     fn deref_mut<'a>(&'a mut self) -> &'a mut [T] {
-        self.data
+        unsafe { mem::transmute(self.data) }
     }
 }
 
 impl<T: Send> Debug for ParSlice<T> where T: Debug {
     fn fmt(&self, f: &mut Formatter) -> Result<(), FmtError> {
-        write!(f, "{:?}", self.data)
+        write!(f, "{:?}", &*self)
     }
 }
 
