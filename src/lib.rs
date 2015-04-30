@@ -182,9 +182,9 @@ mod test {
 
             let (par_vec, par_slices) = ParVec::new(vec, TEST_SLICES);
 
-            for mut slice in par_slices.into_iter() {
+            for mut slice in par_slices {
                 pool.execute(move ||
-                    for pair in slice.iter_mut() {
+                    for pair in &mut *slice {
                         let (x, ref mut x_primes) = *pair;
                         *x_primes = get_prime_factors(x);
                     }
@@ -202,15 +202,25 @@ mod test {
     }
 
     fn is_prime(x: u32) -> bool {
-        if x < 3 { return true; }
-
-        if x & 1 == 0 { return false; }
-
-        for i in (3 .. x).step_by(2) {
-            if x % i == 0 { return false; }
+        // 2 and 3 are prime, but 0 and 1 are not.
+        (x > 1 && x < 4) ||
+        // Fast check for even-ness.
+        x & 1 != 0 &&
+        // If `x mod i` for every odd number `i < x`, then x is prime.
+        // Intentionally naive for the sake of the benchmark.
+        (3 .. x).step_by(2).all(|i| x % i != 0)
+    }
+    
+    #[test]
+    fn test_is_prime() {
+        // Test a reasonable number of primes to make sure the function actually works
+        for &i in &[2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+            assert!(is_prime(i));
         }
 
-        true
+        for i in (4..40).step_by(2) {
+            assert!(!is_prime(i));
+        }
     }
 
 }
