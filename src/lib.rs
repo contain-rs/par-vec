@@ -45,24 +45,24 @@ impl<T: Send> ParVec<T> {
 
     /// Take the inner `Vec` if there are no slices remaining.
     /// Returns `Err(self)` if there are still slices out there.
-    pub fn into_inner_opt(self) -> Result<Vec<T>, ParVec<T>> {
         // Unwrap if we hold a unique reference
         // (we don't use weak refs so ignore those)
-        if arc::strong_count(&self.data) == 1 {
-            let vec_ptr: &mut Vec<T> = unsafe { mem::transmute(&*self.data) };
-            Ok(mem::replace(vec_ptr, Vec::new()))
-        } else {
-            Err(self)
-        }
+    pub fn try_unwrap(mut self) -> Result<Vec<T>, ParVec<T>> {
+        if let Some(data) = arc::get_mut(&mut self.data) {
+             return Ok(mem::replace(&mut data.0, Vec::new()));
+        } 
+        
+        Err(self)
     }
 
     /// Take the inner `Vec`, waiting until all slices have been freed.
-    pub fn into_inner(mut self) -> Vec<T> {
+    pub fn unwrap(mut self) -> Vec<T> {
         loop {
-            match self.into_inner_opt() {
+            match self.try_unwrap() {
                 Ok(vec) => return vec,
                 Err(new_self) => self = new_self,
             }
+            ::std::thread::yield_now();
         }
     }
 }
@@ -137,7 +137,7 @@ mod test {
         let (vec, slices) = ParVec::new([5u32; TEST_MAX as usize].to_vec(), TEST_SLICES);
         mem::drop(slices);
 
-        let vec = vec.into_inner();
+        let vec = vec.unwrap();
 
         assert_eq!(&*vec, &[5u32; TEST_MAX as usize][..]);
     }
@@ -184,7 +184,7 @@ mod test {
                 );
             }
 
-            let mut vec = par_vec.into_inner();
+            let mut vec = par_vec.unwrap();
             // Sort so they're in the same order as sequential.
             vec.sort();
         });
