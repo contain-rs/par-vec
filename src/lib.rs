@@ -1,3 +1,5 @@
+//! Parallel mutation of vectors via non-overlapping slices.
+
 #![feature(alloc, core)]
 #![cfg_attr(test, feature(test, step_by))]
 
@@ -15,17 +17,21 @@ use std::ops;
 /// Allows `T` to be held in `Arc` when it is only `Send`.
 struct RacyCell<T>(T);
 unsafe impl<T: Send> Sync for RacyCell<T> {}
+
+/// A vector that can be mutated in-parallel via non-overlapping slices.
 ///
 /// Get a `ParVec` and a vector of slices via `new()`, send the slices to other threads
-/// and mutate them, then get the mutated vector with `into_inner()` when finished.
+/// and mutate them, then get the mutated vector with `.unwrap()` when finished.
 pub struct ParVec<T> {
     data: Arc<RacyCell<Vec<T>>>,
 }
 
 impl<T: Send> ParVec<T> {
-    /// Create a new `ParVec`, returning it and a vector of slices that can be sent
-    /// to other threads and mutated concurrently.
-    pub fn new(vec: Vec<T>, slices: usize) -> (ParVec<T>, Vec<ParSlice<T>>) {
+    /// Create a new `ParVec`, returning it and a number of slices equal to
+    /// `slice_count`, that can be sent to other threads and mutated in-parallel.
+    ///
+    /// The vector's length will be divided up amongst the slices as evenly as possible.
+    pub fn new(vec: Vec<T>, slice_count: usize) -> (ParVec<T>, Vec<ParSlice<T>>) {
         let slices = sub_slices(&vec, slice_count);
         let data = Arc::new(RacyCell(vec));
         
@@ -55,7 +61,15 @@ impl<T: Send> ParVec<T> {
         Err(self)
     }
 
-    /// Take the inner `Vec`, waiting until all slices have been freed.
+    /// Take the inner `Vec`, waiting in a spinlock until all slices have been freed.
+    ///
+    /// ###Deadlock Warning
+    /// Before calling this method, you should ensure that all `ParSlice` instances have either been:
+    ///
+    /// - moved to other threads that will quit sometime in the future, or;
+    /// - dropped, implicitly (left in an inner scope) or explicitly (passed to `mem::drop()`)
+    ///
+    /// Otherwise, a deadlock will likely occur.
     pub fn unwrap(mut self) -> Vec<T> {
         loop {
             match self.try_unwrap() {
@@ -222,6 +236,5 @@ mod test {
             assert!(!is_prime(i));
         }
     }
-
 }
 
