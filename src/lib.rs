@@ -1,5 +1,5 @@
 //! Parallel mutation of vectors via non-overlapping slices.
-#![cfg_attr(test, feature(test, step_by))]
+#![cfg_attr(feature = "bench", feature(test, step_by))]
 
 use std::fmt::{Formatter, Debug};
 use std::fmt::Error as FmtError;
@@ -186,27 +186,18 @@ impl<T: Send> Drop for ParSlice<T> {
     }
 }
 
+// place these constants here so both the `test` and `bench` modules can use them
+const TEST_SLICES: usize = 8;
+const TEST_MAX: u32 = 1000;
+
 #[cfg(test)]
 mod test {
-    extern crate rand;
-    extern crate threadpool;
-    extern crate test;
-
-    use super::ParVec;
-
-    use std::mem;
-
-    use self::rand::{thread_rng, Rng};
-    use self::test::Bencher;
-    use self::threadpool::ThreadPool;
-
-    const TEST_SLICES: usize = 8;
-    const TEST_MAX: u32 = 1000;
+    use ::{ParVec, TEST_SLICES, TEST_MAX};    
 
     #[test]
     fn test_unwrap_safely() {
         let (vec, slices) = ParVec::new([5u32; TEST_MAX as usize].to_vec(), TEST_SLICES);
-        mem::drop(slices);
+        drop(slices);
 
         let vec = vec.unwrap();
 
@@ -258,6 +249,21 @@ mod test {
             }
         }
     }
+
+    
+}
+
+#[cfg(feature = "bench")]
+mod bench {
+    extern crate rand;
+    extern crate threadpool;
+    extern crate test;
+
+    use ::{ParVec, TEST_SLICES, TEST_MAX};
+
+    use self::rand::{thread_rng, Rng};
+    use self::test::Bencher;
+    use self::threadpool::ThreadPool;   
 
     #[bench]
     fn seq_prime_factors_1000(b: &mut Bencher) {
