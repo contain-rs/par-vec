@@ -1,29 +1,88 @@
 //! Parallel mutation of vectors via non-overlapping slices.
-
-#![feature(alloc, core)]
 #![cfg_attr(test, feature(test, step_by))]
-
-extern crate alloc;
-
-use self::alloc::arc;
 
 use std::fmt::{Formatter, Debug};
 use std::fmt::Error as FmtError;
-use std::raw::Slice as RawSlice;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::mem;
 use std::ops;
 
-/// Allows `T` to be held in `Arc` when it is only `Send`.
-struct RacyCell<T>(T);
-unsafe impl<T: Send> Sync for RacyCell<T> {}
+/// Our inner `Vec` container.
+struct VecBox<T> {
+    slice_count: usize,
+    data: Vec<T>,
+}
+
+impl<T> VecBox<T> {
+    fn new(slice_count: usize, data: Vec<T>) -> VecBox<T> {
+        VecBox {
+            slice_count: slice_count,
+            data: data,
+        }
+    }
+
+    /// Decrement the slice count
+    fn decrement(&mut self) {
+        self.slice_count -= 1;
+    }
+
+    /// Try to unwrap this box, replacing `data` with an empty vector if `slice_count == 0`
+    fn try_unwrap(&mut self) -> Option<Vec<T>> {
+        match self.slice_count {
+            0 => Some(mem::replace(&mut self.data, Vec::new())),
+            _ => None,
+        }
+    }
+}
+
+struct ParVecInner<T> {
+    inner: Mutex<VecBox<T>>,
+    cvar: Condvar,
+}
+
+impl<T: Send> ParVecInner<T> {
+    fn new(slice_count: usize, data: Vec<T>) -> ParVecInner<T> {
+        ParVecInner {
+            inner: Mutex::new(VecBox::new(slice_count, data)),
+            cvar: Condvar::new(),
+        }
+    }
+    
+    fn decrement(&self) {
+        self.inner.lock().unwrap().decrement();
+        self.cvar.notify_one();
+    }
+
+    fn try_unwrap(&self, timeout: u32) -> Option<Vec<T>> {
+        let mut lock = self.inner.lock().unwrap();
+        
+        if let Some(data) = lock.try_unwrap() {
+            return Some(data);
+        }
+
+        let (mut lock, _) = self.cvar.wait_timeout_ms(lock, timeout).unwrap();
+        lock.try_unwrap()
+    }
+
+    fn unwrap(&self) -> Vec<T> {
+        let mut lock = self.inner.lock().unwrap();
+
+        loop {
+            if let Some(data) = lock.try_unwrap() {
+                return data;
+            }
+
+            lock = self.cvar.wait(lock).unwrap();
+        }
+    }
+}
 
 /// A vector that can be mutated in-parallel via non-overlapping slices.
 ///
 /// Get a `ParVec` and a vector of slices via `new()`, send the slices to other threads
 /// and mutate them, then get the mutated vector with `.unwrap()` when finished.
 pub struct ParVec<T> {
-    data: Arc<RacyCell<Vec<T>>>,
+    inner: Arc<ParVecInner<T>>,
 }
 
 impl<T: Send> ParVec<T> {
@@ -33,35 +92,29 @@ impl<T: Send> ParVec<T> {
     /// The vector's length will be divided up amongst the slices as evenly as possible.
     pub fn new(vec: Vec<T>, slice_count: usize) -> (ParVec<T>, Vec<ParSlice<T>>) {
         let slices = sub_slices(&vec, slice_count);
-        let data = Arc::new(RacyCell(vec));
+        let inner = Arc::new(ParVecInner::new(slice_count, vec));
         
         let par_slices = slices.into_iter().map(|slice|
                 ParSlice {
-                    _vec: data.clone(),
+                    inner: inner.clone(),
                     data: slice,
                 }
             ).collect();
 
         let par_vec = ParVec {
-            data: data,
+            inner: inner,
         };
 
         (par_vec, par_slices)
     }
 
-    /// Take the inner `Vec` if there are no slices remaining.
-    /// Returns `Err(self)` if there are still slices out there.
-    pub fn try_unwrap(mut self) -> Result<Vec<T>, ParVec<T>> {
-        // Unwrap if we hold a unique reference.
-        // The return is required because `self` would still be borrowed mutably in `else`.
-        if let Some(data) = arc::get_mut(&mut self.data) {
-             return Ok(mem::replace(&mut data.0, Vec::new()));
-        } 
-        
-        Err(self)
+    /// Attempt to take the inner `Vec` before `timeout` if there are no slices remaining.
+    /// Returns `None` if the timeout elapses and there are still slices remaining.
+    pub fn try_unwrap(&self, timeout: u32) -> Option<Vec<T>> {
+        self.inner.try_unwrap(timeout)
     }
 
-    /// Take the inner `Vec`, waiting in a spinlock until all slices have been freed.
+    /// Take the inner `Vec`, waiting until all slices have been freed.
     ///
     /// ###Deadlock Warning
     /// Before calling this method, you should ensure that all `ParSlice` instances have either been:
@@ -70,22 +123,14 @@ impl<T: Send> ParVec<T> {
     /// - dropped, implicitly (left in an inner scope) or explicitly (passed to `mem::drop()`)
     ///
     /// Otherwise, a deadlock will likely occur.
-    pub fn unwrap(mut self) -> Vec<T> {
-        loop {
-            match self.try_unwrap() {
-                Ok(vec) => return vec,
-                Err(new_self) => self = new_self,
-            }
-            // Yield from the spinlock so we don't eat up too much CPU time.
-            ::std::thread::yield_now();
-        }
+    pub fn unwrap(self) -> Vec<T> {
+        self.inner.unwrap()
     }
 }
 
 /// Create a vector of raw subslices that are as close to each other in size as possible.
-fn sub_slices<T>(parent: &[T], slice_count: usize) -> Vec<RawSlice<T>> {
+fn sub_slices<T>(parent: &[T], slice_count: usize) -> Vec<*mut [T]> {
     use std::cmp;
-    use std::raw::Repr;
 
     let len = parent.len();
     let mut start = 0;
@@ -99,20 +144,18 @@ fn sub_slices<T>(parent: &[T], slice_count: usize) -> Vec<RawSlice<T>> {
         let slice_len = (len - start) / curr;
         let end = cmp::min(start + slice_len, len);
 
-        let slice = parent[start..end].repr();
+        let slice = &parent[start..end];
         start += slice_len;
 
-        slice
+        slice as *const [T] as *mut [T]
     }).collect()
 }
 
 /// A slice of `ParVec` that can be sent to another task for processing.
 /// Automatically releases the slice on drop.
 pub struct ParSlice<T: Send> {
-    // Just to keep the source vector alive while the slice is,
-    // since the ParVec can drop asynchronously.
-    _vec: Arc<RacyCell<Vec<T>>>,
-    data: RawSlice<T>,
+    inner: Arc<ParVecInner<T>>,
+    data: *mut [T],
 }
 
 unsafe impl<T: Send> Send for ParSlice<T> {}
@@ -121,19 +164,25 @@ impl<T: Send> ops::Deref for ParSlice<T> {
     type Target = [T];
 
     fn deref<'a>(&'a self) -> &'a [T] {
-        unsafe { mem::transmute(self.data) }
+        unsafe { & *self.data }
     }
 }
 
 impl<T: Send> ops::DerefMut for ParSlice<T> {
     fn deref_mut<'a>(&'a mut self) -> &'a mut [T] {
-        unsafe { mem::transmute(self.data) }
+        unsafe { &mut *self.data }
     }
 }
 
 impl<T: Send> Debug for ParSlice<T> where T: Debug {
     fn fmt(&self, f: &mut Formatter) -> Result<(), FmtError> {
         write!(f, "{:?}", &*self)
+    }
+}
+
+impl<T: Send> Drop for ParSlice<T> {
+    fn drop(&mut self) {
+        self.inner.decrement();
     }
 }
 
