@@ -220,6 +220,45 @@ mod test {
         assert_eq!(slices.len(), TEST_SLICES);
     }
 
+    #[test]
+    fn test_nonoverlapping_slices() {
+        fn are_nonoverlapping<T>(left: &[T], right: &[T]) -> bool {
+            let left_start = left.as_ptr() as usize;
+            let right_start = right.as_ptr() as usize;
+
+            let left_end = left_start + left.len();
+            let right_end = right_start + right.len();
+
+            // `left` starts and ends before `right`
+            left_end < right_start || 
+                // `right` ends before `left`
+                right_end < left_start
+        }
+
+        let data: Vec<u32> = (1 .. TEST_MAX).collect();
+        let start_ptr = data.as_ptr() as usize;
+
+        let (_, slices) = ParVec::new(data, TEST_SLICES);
+
+        // This can probably be done in O(n log n) instead of O(n^2).
+        // Suggestions are welcome.
+        for (left_idx, left) in slices.iter().enumerate() {
+            for (_, right) in slices.iter().enumerate()
+                .filter(|&(right_idx, _)| right_idx != left_idx) 
+            {
+                let left_start = left.as_ptr() as usize - start_ptr;
+                let right_start = right.as_ptr() as usize - start_ptr;
+
+                assert!(
+                    are_nonoverlapping(left, right), 
+                    "Slices overlapped! left: {left:?} right: {right:?}",
+                    left = (left_start, left_start + left.len()),
+                    right = (right_start, right_start + right.len())
+                )
+            }
+        }
+    }
+
     #[bench]
     fn seq_prime_factors_1000(b: &mut Bencher) {
         let vec: Vec<u32> = (1 .. TEST_MAX).collect();
