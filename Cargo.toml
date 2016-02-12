@@ -14,6 +14,13 @@ documentation = "https://contain-rs.github.io/par-vec/par-vec"
 keywords = ["data-structures", "parallel"]
 readme = "README.md"
 
-[dev-dependencies]
-rand = "*"
-threadpool = "*"
+[features]
+bench = ["rand", "threadpool"]
+
+[dependencies.rand]
+version = "*"
+optional = true
+
+[dependencies.threadpool]
+version = "*"
+optional = true
